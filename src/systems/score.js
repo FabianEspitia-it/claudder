@@ -1,5 +1,6 @@
 import { CONFIG } from '../core/config.js';
 import { EVENTS } from '../core/events.js';
+import { DEATH_REASON } from './collision.js';
 
 export const POINTS = Object.freeze({
   FORWARD_ROW: 10,
@@ -33,16 +34,17 @@ export function createScoreSystem() {
     game.events.emit(EVENTS.SCORE_CHANGE, { score: state.score, delta: amount, reason });
   }
 
-  // Points only for rows the frog has not reached yet during this life.
-  function onFrogMoved({ row }) {
+  function onFrogMoved({ frog, row }) {
     if (!Number.isInteger(row) || row >= bestRow) return;
+
+    if (frog && (!frog.alive || frog.row !== row)) return;
+
     addPoints((bestRow - row) * POINTS.FORWARD_ROW, 'forward');
     bestRow = row;
   }
 
   function onFrogHome({ home }) {
-    if (home?.occupied) return;
-    if (home) home.occupied = true;
+    if (home && !home.occupy()) return;
 
     state.homesFilled++;
     addPoints(
@@ -96,10 +98,8 @@ export function createScoreSystem() {
       state.timeLeft -= deltaTime;
       if (state.timeLeft > 0) return;
 
-      // The timeout goes through FROG_DIED so every listener (frog animation,
-      // sound) reacts the same way as to any other death.
       game.events.emit(EVENTS.TIME_UP);
-      game.events.emit(EVENTS.FROG_DIED, { reason: 'time' });
+      game.events.emit(EVENTS.FROG_DIED, { reason: DEATH_REASON.TIME });
     },
   };
 }

@@ -1,5 +1,9 @@
-import { CONFIG, yToRow } from '../core/config.js';
+import { CONFIG } from '../core/config.js';
 import { EVENTS } from '../core/events.js';
+import { Car } from '../entities/car.js';
+import { DEATH_CAUSES } from '../entities/frog.js';
+import { Home } from '../entities/home.js';
+import { Platform } from '../entities/platform.js';
 
 export const STATUS = Object.freeze({
   SAFE: 'safe',
@@ -13,103 +17,98 @@ export const DEATH_REASON = Object.freeze({
   OUT_OF_BOUNDS: 'outOfBounds',
   WALL: 'wall',
   HOME_TAKEN: 'homeTaken',
+  TIME: 'time', // reported by score.js when the life timer runs out
 });
 
-// Fraction of the frog's size ignored on each side when checking cars, so a
-// near miss does not kill the player.
-const FROG_HITBOX_INSET = 0.15;
+const CAUSE_BY_REASON = Object.freeze({
+  [DEATH_REASON.CAR]: DEATH_CAUSES.HIT,
+  [DEATH_REASON.WATER]: DEATH_CAUSES.DROWNED,
+  [DEATH_REASON.OUT_OF_BOUNDS]: DEATH_CAUSES.SWEPT_AWAY,
+  [DEATH_REASON.WALL]: DEATH_CAUSES.BLOCKED_HOME,
+  [DEATH_REASON.HOME_TAKEN]: DEATH_CAUSES.BLOCKED_HOME,
+  [DEATH_REASON.TIME]: DEATH_CAUSES.TIME_UP,
+});
 
-const PLATFORM_TYPES = new Set(['log', 'turtle']);
-
-export function overlaps(a, b) {
-  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
-}
-
-export function containsPoint(box, x, y) {
-  return x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h;
-}
-
-function frogHitbox(frog) {
-  const insetX = frog.w * FROG_HITBOX_INSET;
-  const insetY = frog.h * FROG_HITBOX_INSET;
-  return {
-    x: frog.x + insetX,
-    y: frog.y + insetY,
-    w: frog.w - 2 * insetX,
-    h: frog.h - 2 * insetY,
-  };
-}
+export const causeFor = (reason) => CAUSE_BY_REASON[reason] ?? DEATH_CAUSES.HIT;
 
 const safe = (extra = {}) => ({ status: STATUS.SAFE, ...extra });
 const dead = (reason) => ({ status: STATUS.DEAD, reason });
 
-export function resolveFrog(frog, entities) {
-  const { ZONE_ROWS, FIELD_WIDTH } = CONFIG;
-  const centerX = frog.x + frog.w / 2;
-  const centerY = frog.y + frog.h / 2;
 
-  if (centerX < 0 || centerX > FIELD_WIDTH) return dead(DEATH_REASON.OUT_OF_BOUNDS);
+export function resolveFrog(frog, entities, { checkTerrain = !frog.isHopping } = {}) {
+  const { ZONE_ROWS } = CONFIG;
+  const row = frog.row;
 
-  const row = yToRow(centerY);
+  if (row >= ZONE_ROWS.ROAD_TOP && row <= ZONE_ROWS.ROAD_BOTTOM) {
+    const hitByCar = entities.some((entity) => entity instanceof Car && entity.intersects(frog));
+    return hitByCar ? dead(DEATH_REASON.CAR) : safe();
+  }
+
+  if (!checkTerrain) return safe();
+
+
+  if (frog.isOutOfBounds) return dead(DEATH_REASON.OUT_OF_BOUNDS);
 
   if (row === ZONE_ROWS.HOME) {
-    const home = entities.find((e) => e.type === 'home' && containsPoint(e, centerX, centerY));
-    if (!home) return dead(DEATH_REASON.WALL);
-    if (home.occupied) return dead(DEATH_REASON.HOME_TAKEN);
-    return { status: STATUS.HOME, home };
+    const home = entities.find((entity) => entity instanceof Home && entity.canAccept(frog));
+    if (home) return { status: STATUS.HOME, home };
+    const takenHome = entities.some(
+      (entity) => entity instanceof Home && entity.containsPoint(frog.centerX, frog.centerY),
+    );
+    return dead(takenHome ? DEATH_REASON.HOME_TAKEN : DEATH_REASON.WALL);
   }
 
   if (row >= ZONE_ROWS.RIVER_TOP && row <= ZONE_ROWS.RIVER_BOTTOM) {
-    const platform = entities.find(
-      (e) => PLATFORM_TYPES.has(e.type) && !e.submerged && containsPoint(e, centerX, centerY),
-    );
+    const platform = entities.find((entity) => entity instanceof Platform && entity.canCarry(frog));
     return platform ? safe({ platform }) : dead(DEATH_REASON.WATER);
-  }
-
-  if (row >= ZONE_ROWS.ROAD_TOP && row <= ZONE_ROWS.ROAD_BOTTOM) {
-    const hitbox = frogHitbox(frog);
-    const car = entities.find((e) => e.type === 'car' && overlaps(hitbox, e));
-    return car ? dead(DEATH_REASON.CAR) : safe();
   }
 
   return safe();
 }
 
+
 export function createCollisionSystem({ getWorld }) {
   let game = null;
-  let latched = false;
+
+  function check(frog, options) {
+    const result = resolveFrog(frog, getWorld().entities, options);
+    system.lastResult = result;
+
+    if (result.status === STATUS.SAFE) {
+      if (!frog.isHopping) frog.ride?.(result.platform ?? null);
+    } else if (result.status === STATUS.DEAD) {
+      game.events.emit(EVENTS.FROG_DIED, { reason: result.reason });
+    } else {
+      game.events.emit(EVENTS.FROG_HOME, { home: result.home });
+      frog.reset();
+    }
+  }
 
   const system = {
     lastResult: null,
 
     initialize(owner) {
       game = owner;
+      const { events } = game;
+
+      events.on(EVENTS.FROG_DIED, ({ reason }) => getWorld().frog?.die(causeFor(reason)));
+
+      events.on(EVENTS.FROG_MOVED, ({ frog }) => {
+        if (frog?.alive) check(frog, { checkTerrain: true });
+      });
     },
 
     reset() {
-      latched = false;
       system.lastResult = null;
+      getWorld().frog?.reset();
     },
 
     update() {
-      const { frog, entities } = getWorld();
-      if (!frog || frog.alive === false) return;
+      const { frog } = getWorld();
+      if (!frog) return;
 
-      const result = resolveFrog(frog, entities);
-      system.lastResult = result;
-
-      if (result.status === STATUS.SAFE) {
-        latched = false;
-        return;
-      }
-      if (latched) return;
-      latched = true;
-
-      if (result.status === STATUS.DEAD) {
-        game.events.emit(EVENTS.FROG_DIED, { reason: result.reason });
-      } else {
-        game.events.emit(EVENTS.FROG_HOME, { home: result.home });
-      }
+      if (frog.alive) check(frog);
+      else if (frog.isDeathAnimationDone) frog.reset();
     },
   };
 

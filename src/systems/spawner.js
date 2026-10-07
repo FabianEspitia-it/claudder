@@ -1,5 +1,9 @@
-import { CONFIG, rowToY } from '../core/config.js';
+import { CONFIG } from '../core/config.js';
 import { EVENTS } from '../core/events.js';
+import { Car } from '../entities/car.js';
+import { Home } from '../entities/home.js';
+import { Platform, PLATFORM_KINDS } from '../entities/platform.js';
+import { CAR_SETTINGS, PLATFORM_SETTINGS } from '../entities/settings.js';
 
 export const wrapPeriod = (width) => CONFIG.FIELD_WIDTH + width;
 
@@ -18,53 +22,71 @@ export function laneStats(lane) {
 export function layoutLane(lane, random = Math.random) {
   const { width, count, spacing } = laneStats(lane);
   const phase = random() * spacing;
-  const y = rowToY(lane.row);
+  const diveCycle = PLATFORM_SETTINGS.dive.surfacedTime + PLATFORM_SETTINGS.dive.submergedTime;
 
   return Array.from({ length: count }, (_, index) => {
     const spec = {
       type: lane.type,
+      row: lane.row,
       x: -width + phase + index * spacing,
-      y,
-      w: width,
-      h: CONFIG.CELL_SIZE,
+      lengthInCells: lane.length,
       speed: lane.speed,
+      wrapLength: wrapPeriod(width),
     };
-    if (lane.dives) spec.dives = true;
+    if (lane.type === 'car') spec.colorIndex = lane.row + index;
+    if (lane.dives) {
+      spec.dives = true;
+
+      spec.diveOffset = (index / count) * diveCycle;
+    }
     return spec;
   });
 }
 
 export function homeSpecs() {
-  return CONFIG.HOME_COLUMNS.map((column) => ({
-    type: 'home',
-    x: column * CONFIG.CELL_SIZE,
-    y: rowToY(CONFIG.ZONE_ROWS.HOME),
-    w: CONFIG.CELL_SIZE,
-    h: CONFIG.CELL_SIZE,
-    occupied: false,
-  }));
+  return CONFIG.HOME_COLUMNS.map((column) => ({ type: 'home', column }));
 }
 
 export function buildEntitySpecs(level, random = Math.random) {
   return [...homeSpecs(), ...level.lanes.flatMap((lane) => layoutLane(lane, random))];
 }
 
-// Fallback movement for entities that have no update() of their own.
-export function advance(entity, deltaTime) {
-  entity.x += entity.speed * deltaTime;
-  const period = wrapPeriod(entity.w);
-  if (entity.speed > 0 && entity.x > CONFIG.FIELD_WIDTH) {
-    entity.x -= period;
-  } else if (entity.speed < 0 && entity.x + entity.w < 0) {
-    entity.x += period;
+export function createEntityFromSpec(spec) {
+  const { palette } = CAR_SETTINGS;
+  const laneOptions = {
+    row: spec.row,
+    x: spec.x,
+    lengthInCells: spec.lengthInCells,
+    speed: spec.speed,
+    wrapLength: spec.wrapLength,
+  };
+
+  switch (spec.type) {
+    case 'home':
+      return new Home({ column: spec.column });
+    case 'car':
+      return new Car({ ...laneOptions, color: palette[(spec.colorIndex ?? 0) % palette.length] });
+    case 'log':
+      return new Platform({ ...laneOptions, kind: PLATFORM_KINDS.LOG });
+    case 'turtle':
+      return new Platform({
+        ...laneOptions,
+        kind: PLATFORM_KINDS.TURTLES,
+        dive: spec.dives ? { offset: spec.diveOffset } : false,
+      });
+    default:
+      throw new Error(`[spawner] unknown entity type "${spec.type}"`);
   }
 }
 
 
-export function createSpawner({ createEntity = (spec) => ({ ...spec }), random = Math.random } = {}) {
+export function createSpawner({ createEntity = createEntityFromSpec, random = Math.random } = {}) {
   const spawner = {
-    // Same array for the whole game: cleared in place, never replaced.
     entities: [],
+
+    get homes() {
+      return spawner.entities.filter((entity) => entity instanceof Home);
+    },
 
     initialize(game) {
       game.events.on(EVENTS.LEVEL_START, ({ level }) => spawner.spawnLevel(level));
@@ -82,10 +104,7 @@ export function createSpawner({ createEntity = (spec) => ({ ...spec }), random =
     },
 
     update(deltaTime) {
-      for (const entity of spawner.entities) {
-        if (typeof entity.update === 'function') entity.update(deltaTime);
-        else if (entity.speed) advance(entity, deltaTime);
-      }
+      for (const entity of spawner.entities) entity.update?.(deltaTime);
     },
   };
 
