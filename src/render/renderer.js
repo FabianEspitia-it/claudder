@@ -3,6 +3,7 @@ import { Car } from '../entities/car.js';
 import { Home } from '../entities/home.js';
 import { Platform } from '../entities/platform.js';
 import { drawFrogShape } from '../entities/frog.js';
+import { drawScreen } from './screens.js';
 
 const { CELL_SIZE, ZONE_ROWS, FIELD_WIDTH, FIELD_HEIGHT, HUD_HEIGHT, HOME_COLUMNS } = CONFIG;
 
@@ -100,5 +101,6 @@ export const renderer = {
     drawBackground(ctx);
     if (game.world && game.state !== 'menu') drawWorld(ctx, game.world);
     drawHud(ctx, game);
+    drawScreen(ctx, game);   // encima de todo
   },
 };
